@@ -15,6 +15,12 @@ type Backend struct {
 	ReverseProxy *httputil.ReverseProxy
 }
 
+// Data structure to track all backends.
+type ServerPool struct {
+	backends []*Backend
+	current uint64
+}
+
 func main() {
 	fmt.Println("Hello World!")
 }
