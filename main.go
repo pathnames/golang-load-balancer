@@ -52,6 +52,26 @@ func (b *Backend) IsAlive() (alive bool) {
 	return
 }
 
+// GetNextPeer returns the next available backend server using a round-robin strategy.
+// It starts from the next server in line and loops through all backends once to find an alive server.
+// If a different server than the original candidate is selected, it updates the current index atomically
+// to ensure thread-safe round-robin behavior under concurrent requests.
+// Returns nil if no backend is alive.
+func (s *ServerPool) GetNextPeer() *Backend {
+  next_idx := s.NextIndex()
+  l := len(s.backends) + next_idx // start from next_idx and move a full cycle
+  for i := next_idx; i < l; i++ {
+    idx := i % len(s.backends) 
+    if s.backends[idx].IsAlive() {
+      if i != next_idx {
+        atomic.StoreUint64(&s.current, uint64(idx)) 
+      }
+      return s.backends[idx]
+    }
+  }
+  return nil
+}
+
 func main() {
 	fmt.Println("Hello World!")
 }
