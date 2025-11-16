@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"net/http"
 	"net/http/httputil"
 	"net/url"
 	"sync"
@@ -71,6 +72,21 @@ func (s *ServerPool) GetNextPeer() *Backend {
   }
   return nil
 }
+
+// lb is the main load balancer handler for incoming HTTP requests.
+// It selects the next available backend using GetNextPeer().
+// If an alive backend is found, the request is forwarded to its ReverseProxy.
+// If no backends are available, it responds with a 503 Service Unavailable error.
+func lb(w http.ResponseWriter, r *http.Request) {
+	peer := serverPool.GetNextPeer()
+	if peer != nil {
+		peer.ReverseProxy.ServeHTTP(w, r)
+		return 
+	} 
+	http.Error(w, "Service not available", http.StatusServiceUnavailable)
+}
+
+var serverPool ServerPool
 
 func main() {
 	fmt.Println("Hello World!")
