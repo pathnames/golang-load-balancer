@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"net/http/httputil"
@@ -8,6 +9,24 @@ import (
 	"sync"
 	"sync/atomic"
 )
+
+// Constants for retry handling in HTTP requests.
+// `Attempts` represents the starting index for counting attempts.
+// `Retry` is used as a key for storing/retrieving retry count in request context.
+// iota implements int values increasing incrementally, much like std::iota in C++.
+const (
+    Attempts int = iota
+    Retry
+)
+
+// GetRetryFromContext extracts the retry count from the request context.
+// Returns 0 if the retry value is not set.
+func GetRetryFromContext(r *http.Request) int {
+    if retry, ok := r.Context().Value(Retry).(int); ok {
+        return retry
+    }
+    return 0
+}
 
 // Data structure to represent a backend server.
 type Backend struct {
@@ -87,7 +106,7 @@ func lb(w http.ResponseWriter, r *http.Request) {
 }
 
 var serverPool ServerPool
-
+ 
 func main() {
 	fmt.Println("Hello World!")
 }
