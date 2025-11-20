@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"sync"
 	"sync/atomic"
+	"log"
 )
 
 // Constants for retry handling in HTTP requests.
@@ -19,9 +20,9 @@ const (
     Retry
 )
 
-// GetRetryFromContext extracts the retry count from the request context.
+// GetAttemptsFromContext extracts the retry count from the request context.
 // Returns 0 if the retry value is not set.
-func GetRetryFromContext(r *http.Request) int {
+func GetAttemptsFromContext(r *http.Request) int {
     if retry, ok := r.Context().Value(Retry).(int); ok {
         return retry
     }
@@ -93,17 +94,34 @@ func (s *ServerPool) GetNextPeer() *Backend {
 }
 
 // lb is the main load balancer handler for incoming HTTP requests.
-// It selects the next available backend using GetNextPeer().
-// If an alive backend is found, the request is forwarded to its ReverseProxy.
-// If no backends are available, it responds with a 503 Service Unavailable error.
+// It performs the following steps:
+// 1. Retrieves the current attempt count from the request context.
+// 2. If the number of attempts exceeds 3, it logs the event and returns a 503 error.
+// 3. Otherwise, it selects the next available backend using GetNextPeer().
+// 4. If a live backend is found, it forwards the request to that backend's ReverseProxy.
+// 5. If no live backends are available, it responds with a 503 Service Unavailable error.
 func lb(w http.ResponseWriter, r *http.Request) {
-	peer := serverPool.GetNextPeer()
-	if peer != nil {
-		peer.ReverseProxy.ServeHTTP(w, r)
-		return 
-	} 
-	http.Error(w, "Service not available", http.StatusServiceUnavailable)
+    attempts := GetAttemptsFromContext(r)
+    
+    // Check if max retry attempts have been exceeded
+    if attempts > 3 {
+        log.Printf("%s(%s) Max attempts reached, terminating\n", r.RemoteAddr, r.URL.Path)
+        http.Error(w, "Service not available", http.StatusServiceUnavailable)
+        return
+    }
+
+    // Select the next available backend from the server pool
+    peer := serverPool.GetNextPeer()
+    if peer != nil {
+        // Forward the request to the backend's reverse proxy
+        peer.ReverseProxy.ServeHTTP(w, r)
+        return
+    }
+
+    // No backend is available, return 503
+    http.Error(w, "Service not available", http.StatusServiceUnavailable)
 }
+
 
 var serverPool ServerPool
  
