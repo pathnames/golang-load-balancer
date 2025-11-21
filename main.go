@@ -4,6 +4,7 @@ import (
 	"context"
 	"flag"
 	"log"
+  "net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -112,6 +113,26 @@ func lb(w http.ResponseWriter, r *http.Request) {
 	// No backends available
 	http.Error(w, "Service not available", http.StatusServiceUnavailable)
 }
+
+// isBackendAlive checks whether a backend server is reachable.
+// It does this by attempting to establish a TCP connection to the backend's host and port.
+// Returns true if the connection succeeds, false otherwise.
+func isBackendAlive(u *url.URL) bool {
+	timeout := 2 * time.Second // Set a 2-second timeout for the connection attempt
+
+	// Attempt a TCP connection to the backend
+	conn, err := net.DialTimeout("tcp", u.Host, timeout)
+	if err != nil {
+		// Connection failed, log the error and return false
+		log.Println("Site unreachable, error: ", err)
+		return false
+	}
+
+	// Connection succeeded, close immediately as we just wanted to check reachability
+	_ = conn.Close()
+	return true
+}
+
 
 var serverPool ServerPool
 
