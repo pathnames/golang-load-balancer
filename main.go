@@ -1,14 +1,15 @@
 package main
 
 import (
-	"context"
+	"flag"
 	"fmt"
+	"log"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"strings"
 	"sync"
 	"sync/atomic"
-	"log"
 )
 
 // Constants for retry handling in HTTP requests.
@@ -93,6 +94,7 @@ func (s *ServerPool) GetNextPeer() *Backend {
   return nil
 }
 
+
 // lb is the main load balancer handler for incoming HTTP requests.
 // It performs the following steps:
 // 1. Retrieves the current attempt count from the request context.
@@ -126,5 +128,31 @@ func lb(w http.ResponseWriter, r *http.Request) {
 var serverPool ServerPool
  
 func main() {
-	fmt.Println("Hello World!")
+    // Define command-line flags for backend servers and port
+	var serverList string
+    var port int 
+    flag.StringVar(&serverList, "backends", "", "Provide a comma-separated list of backends")
+    flag.IntVar(&port, "port", 8080, "Port to serve")
+    
+    // Parse the command-line flags
+    flag.Parse()
+
+    // Ensure at least one backend server is provided
+    if len(serverList) == 0 {
+        log.Fatal("Please provide a minimum of one backend server.")
+    }
+
+    // Split the comma-separated list of backend URLs
+    tokens := strings.Split(serverList, ",")
+
+    // Parse each backend URL and print it for verification
+    for _, tok := range tokens {
+        // Parse string into URL structure
+        serverUrl, err := url.Parse(tok)
+        if err != nil {
+            log.Fatal(err) // Exit if the URL is invalid
+        }
+        // Print the parsed backend URL to verify input
+        fmt.Printf("Server: [%s]\n", serverUrl)
+    }
 }
