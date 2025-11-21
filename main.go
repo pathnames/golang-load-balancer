@@ -133,6 +133,30 @@ func isBackendAlive(u *url.URL) bool {
 	return true
 }
 
+// HealthCheck iterates over all backends in the server pool, checks whether
+// each backend is reachable, updates its "alive" status, and logs the result.
+// This allows the load balancer to dynamically avoid unhealthy servers.
+func (s *ServerPool) HealthCheck() {
+  for _, b := range s.backends {
+
+    // Assume backend is healthy unless proven otherwise.
+    status := "up"
+
+    // Perform a lightweight liveness probe (e.g., HTTP HEAD request).
+    alive := isBackendAlive(b.URL)
+
+    // Update the backend's state so the load balancer can skip dead nodes.
+    b.SetAlive(alive)
+
+    // If the backend check fails, reflect it in the status log.
+    if !alive {
+      status = "down"
+    }
+
+    // Log the backend URL alongside its new health status.
+    log.Printf("%s [%s]\n", b.URL, status)
+  }
+}
 
 var serverPool ServerPool
 
