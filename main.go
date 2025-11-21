@@ -1,8 +1,8 @@
 package main
 
 import (
+	"context"
 	"flag"
-	"fmt"
 	"log"
 	"net/http"
 	"net/http/httputil"
@@ -10,149 +10,170 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
+  "fmt"
 )
 
-// Constants for retry handling in HTTP requests.
-// `Attempts` represents the starting index for counting attempts.
-// `Retry` is used as a key for storing/retrieving retry count in request context.
-// iota implements int values increasing incrementally, much like std::iota in C++.
+// Constants for tracking retries and attempts in request context
 const (
-    Attempts int = iota
-    Retry
+	Attempts int = iota // Total attempts for a request across different backends
+	Retry               // Retry count for the same backend
 )
 
-// GetAttemptsFromContext extracts the retry count from the request context.
-// Returns 0 if the retry value is not set.
+// GetAttemptsFromContext extracts the retry count from the request's context
+// Returns 0 if the value is not set
 func GetAttemptsFromContext(r *http.Request) int {
-    if retry, ok := r.Context().Value(Retry).(int); ok {
-        return retry
-    }
-    return 0
+	if retry, ok := r.Context().Value(Retry).(int); ok {
+		return retry
+	}
+	return 0
 }
 
-// Data structure to represent a backend server.
+// Backend represents a single backend server
 type Backend struct {
-	URL *url.URL
-	Alive bool
-	mux sync.RWMutex
-	ReverseProxy *httputil.ReverseProxy
+	URL          *url.URL                 // Backend URL
+	Alive        bool                     // Is the backend alive?
+	mux          sync.RWMutex             // Protects concurrent access to Alive
+	ReverseProxy *httputil.ReverseProxy  // Reverse proxy to forward requests
 }
 
-// Data structure to track all backends.
+// ServerPool tracks all backends and the current index for round-robin
 type ServerPool struct {
 	backends []*Backend
-	current uint64
+	current  uint64 // atomic counter for round-robin
 }
 
-// Returns the next index in the backends slice to route the request to. 
-// modulus trick is used to keep index in the range [0, len(backends) - 1]
-// Imagine multiple requests are happening at the same time (common in a server).
-// Without atomic, two requests could run NextIndex() at the exact same time.
-// Both read the same current value before either increments it.
-// Both could return the same index, even though they should pick different servers.
-// This would break the round-robin behavior.
-// atomic.AddUint64 guarantees that the increment happens safely, even if many requests happen at the same time.
-// No two requests will ever get the same increment value.
-// Each request sees a unique current value.
-// The round-robin works correctly under concurrent access.
-func (s *ServerPool) NextIndex() int {
-  return int(atomic.AddUint64(&s.current, uint64(1)) % uint64(len(s.backends)))
-}
-
-// Sets backend to be alive.
+// SetAlive updates the backend's alive status
 func (b *Backend) SetAlive(alive bool) {
 	b.mux.Lock()
 	b.Alive = alive
 	b.mux.Unlock()
 }
 
-// Helper function to check whether a backend is alive or not.
-func (b *Backend) IsAlive() (alive bool) {
+// IsAlive safely returns whether the backend is alive
+func (b *Backend) IsAlive() bool {
 	b.mux.RLock()
-	alive = b.Alive
-	b.mux.RUnlock()
-	return
+	defer b.mux.RUnlock()
+	return b.Alive
 }
 
-// GetNextPeer returns the next available backend server using a round-robin strategy.
-// It starts from the next server in line and loops through all backends once to find an alive server.
-// If a different server than the original candidate is selected, it updates the current index atomically
-// to ensure thread-safe round-robin behavior under concurrent requests.
-// Returns nil if no backend is alive.
+// NextIndex returns the next backend index in a round-robin fashion
+// Atomic increment ensures concurrent requests do not pick the same backend
+func (s *ServerPool) NextIndex() int {
+	return int(atomic.AddUint64(&s.current, 1) % uint64(len(s.backends)))
+}
+
+// GetNextPeer returns the next alive backend in round-robin order
+// Updates the current index if it chooses a different backend than expected
 func (s *ServerPool) GetNextPeer() *Backend {
-  next_idx := s.NextIndex()
-  l := len(s.backends) + next_idx // start from next_idx and move a full cycle
-  for i := next_idx; i < l; i++ {
-    idx := i % len(s.backends) 
-    if s.backends[idx].IsAlive() {
-      if i != next_idx {
-        atomic.StoreUint64(&s.current, uint64(idx)) 
-      }
-      return s.backends[idx]
-    }
-  }
-  return nil
+	nextIdx := s.NextIndex()
+	l := len(s.backends) + nextIdx // loop through all backends once
+	for i := nextIdx; i < l; i++ {
+		idx := i % len(s.backends)
+		if s.backends[idx].IsAlive() {
+			if i != nextIdx {
+				atomic.StoreUint64(&s.current, uint64(idx))
+			}
+			return s.backends[idx]
+		}
+	}
+	return nil
 }
 
+// MarkBackendStatus sets a backend's alive/dead status by URL
+func (s *ServerPool) MarkBackendStatus(backendUrl *url.URL, alive bool) {
+	for _, b := range s.backends {
+		if b.URL.String() == backendUrl.String() {
+			b.SetAlive(alive)
+			break
+		}
+	}
+}
 
-// lb is the main load balancer handler for incoming HTTP requests.
-// It performs the following steps:
-// 1. Retrieves the current attempt count from the request context.
-// 2. If the number of attempts exceeds 3, it logs the event and returns a 503 error.
-// 3. Otherwise, it selects the next available backend using GetNextPeer().
-// 4. If a live backend is found, it forwards the request to that backend's ReverseProxy.
-// 5. If no live backends are available, it responds with a 503 Service Unavailable error.
+// lb is the HTTP handler for the load balancer
+// It forwards requests to available backends or returns 503 if none are alive
 func lb(w http.ResponseWriter, r *http.Request) {
-    attempts := GetAttemptsFromContext(r)
-    
-    // Check if max retry attempts have been exceeded
-    if attempts > 3 {
-        log.Printf("%s(%s) Max attempts reached, terminating\n", r.RemoteAddr, r.URL.Path)
-        http.Error(w, "Service not available", http.StatusServiceUnavailable)
-        return
-    }
+	attempts := GetAttemptsFromContext(r)
 
-    // Select the next available backend from the server pool
-    peer := serverPool.GetNextPeer()
-    if peer != nil {
-        // Forward the request to the backend's reverse proxy
-        peer.ReverseProxy.ServeHTTP(w, r)
-        return
-    }
+	if attempts > 3 {
+		// Too many attempts, give up
+		log.Printf("%s(%s) Max attempts reached, terminating\n", r.RemoteAddr, r.URL.Path)
+		http.Error(w, "Service not available", http.StatusServiceUnavailable)
+		return
+	}
 
-    // No backend is available, return 503
-    http.Error(w, "Service not available", http.StatusServiceUnavailable)
+	peer := serverPool.GetNextPeer()
+	if peer != nil {
+		// Forward request to chosen backend
+		peer.ReverseProxy.ServeHTTP(w, r)
+		return
+	}
+
+	// No backends available
+	http.Error(w, "Service not available", http.StatusServiceUnavailable)
 }
-
 
 var serverPool ServerPool
- 
+
 func main() {
-    // Define command-line flags for backend servers and port
+	// Command-line flags for backends and port
 	var serverList string
-    var port int 
-    flag.StringVar(&serverList, "backends", "", "Provide a comma-separated list of backends")
-    flag.IntVar(&port, "port", 8080, "Port to serve")
-    
-    // Parse the command-line flags
-    flag.Parse()
+	var port int
+	flag.StringVar(&serverList, "backends", "", "Comma-separated list of backends")
+	flag.IntVar(&port, "port", 8080, "Port to serve")
+	flag.Parse()
 
-    // Ensure at least one backend server is provided
-    if len(serverList) == 0 {
-        log.Fatal("Please provide a minimum of one backend server.")
-    }
+	// Require at least one backend
+	if len(serverList) == 0 {
+		log.Fatal("Please provide a minimum of one backend server.")
+	}
 
-    // Split the comma-separated list of backend URLs
-    tokens := strings.Split(serverList, ",")
+	// Split backends and create ReverseProxy for each
+	tokens := strings.Split(serverList, ",")
+	for _, tok := range tokens {
+		serverUrl, err := url.Parse(tok)
+		if err != nil {
+			log.Fatal(err) // Exit if URL is invalid
+		}
 
-    // Parse each backend URL and print it for verification
-    for _, tok := range tokens {
-        // Parse string into URL structure
-        serverUrl, err := url.Parse(tok)
-        if err != nil {
-            log.Fatal(err) // Exit if the URL is invalid
-        }
-        // Print the parsed backend URL to verify input
-        fmt.Printf("Server: [%s]\n", serverUrl)
-    }
+		// Create reverse proxy for backend
+		proxy := httputil.NewSingleHostReverseProxy(serverUrl)
+
+		// Set error handler to retry requests or mark backend as down
+		proxy.ErrorHandler = func(writer http.ResponseWriter, request *http.Request, e error) {
+			log.Printf("[%s] %s\n", serverUrl.Host, e.Error())
+
+			// Retry the same backend up to 3 times
+			retries := GetAttemptsFromContext(request)
+			if retries < 3 {
+				time.Sleep(10 * time.Millisecond)
+				ctx := context.WithValue(request.Context(), Retry, retries+1)
+				proxy.ServeHTTP(writer, request.WithContext(ctx))
+				return
+			}
+
+			// Mark backend as dead after retries
+			serverPool.MarkBackendStatus(serverUrl, false)
+
+			// Retry request on next available backend
+			attempts := GetAttemptsFromContext(request)
+			log.Printf("%s(%s) Attempting retry %d\n", request.RemoteAddr, request.URL.Path, attempts)
+			ctx := context.WithValue(request.Context(), Attempts, attempts+1)
+			lb(writer, request.WithContext(ctx))
+		}
+
+		// Add backend to pool
+		serverPool.backends = append(serverPool.backends, &Backend{
+			URL:          serverUrl,
+			Alive:        true,
+			ReverseProxy: proxy,
+		})
+
+		log.Printf("Added backend: %s\n", serverUrl)
+	}
+
+	// Start the HTTP load balancer server
+	http.HandleFunc("/", lb)
+	log.Printf("Load balancer started on port %d\n", port)
+	log.Fatal(http.ListenAndServe(fmt.Sprintf(":%d", port), nil))
 }
