@@ -158,6 +158,21 @@ func (s *ServerPool) HealthCheck() {
   }
 }
 
+// healthCheck launches a periodic background task that runs every 20 seconds.
+// On each tick, it triggers the ServerPool's HealthCheck method to probe all
+// registered backends and update their availability status.
+func healthCheck() {
+  // Ticker emits an event every 20 seconds
+  t := time.NewTicker(20 * time.Second)
+
+  // Loop over ticker channel events
+  for range t.C {
+    log.Println("Starting health check...")
+    serverPool.HealthCheck()
+    log.Println("Health check completed")
+  }
+}
+
 var serverPool ServerPool
 
 func main() {
@@ -216,6 +231,8 @@ func main() {
 
 		log.Printf("Added backend: %s\n", serverUrl)
 	}
+
+	go healthCheck()
 
 	// Start the HTTP load balancer server
 	http.HandleFunc("/", lb)
